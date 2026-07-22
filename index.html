@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Shared Canvas</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;height:100%;width:100%;font-family:sans-serif;background:#1e1e1e;}
+  #canvas{display:block;background:#ffffff;touch-action:none;cursor:crosshair;}
+  #toolbar{
+    position:fixed;top:8px;left:8px;background:rgba(30,30,30,0.85);
+    padding:8px 10px;border-radius:10px;display:flex;align-items:center;gap:8px;
+    color:#eee;font-size:12px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.4);
+    flex-wrap:wrap;max-width:90vw;
+  }
+  #toolbar label{display:flex;align-items:center;gap:4px;}
+  #toolbar input[type=color]{width:28px;height:28px;border:none;background:none;padding:0;cursor:pointer;}
+  #toolbar input[type=range]{width:80px;}
+  #toolbar button{
+    background:#333;color:#eee;border:1px solid #555;border-radius:6px;
+    padding:5px 8px;cursor:pointer;font-size:12px;
+  }
+  #toolbar button.active{background:#4caf50;border-color:#4caf50;}
+  #toolbar button:hover{background:#444;}
+  #peers{
+    position:fixed;top:8px;right:8px;background:rgba(30,30,30,0.85);
+    padding:6px 10px;border-radius:10px;color:#eee;font-size:12px;z-index:10;
+    max-width:220px;max-height:60vh;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,0.4);
+  }
+  #peers h4{margin:2px 0 6px 0;font-size:12px;opacity:0.8;}
+  .peerRow{display:flex;align-items:center;gap:6px;margin:3px 0;}
+  .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+  .cursorLabel{
+    position:absolute;font-size:10px;color:#fff;padding:1px 5px;border-radius:4px;
+    pointer-events:none;transform:translate(-50%,-140%);white-space:nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="toolbar">
+  <label>Color <input type="color" id="colorPick" value="#ff3b30"></label>
+  <label>Size <input type="range" id="sizeRange" min="1" max="40" value="4"></label>
+  <button id="eraserBtn">Eraser</button>
+  <button id="clearBtn">Clear All</button>
+</div>
+<div id="peers"><h4>Peers</h4><div id="peerList">connecting...</div></div>
+<div id="cursorLayer" style="position:fixed;inset:0;pointer-events:none;z-index:5;"></div>
+
+<script>
+const BS=(()=>{const emb=window.parent!==window;let c={};const ready=new Promise(res=>{
+if(!emb)return res();window.addEventListener("message",e=>{if(e.source===window.parent&&
+e.data&&e.data.type==="bs-storage-data"){c=e.data.data||{};res()}});
+window.parent.postMessage({type:"bs-storage-load"},"*");setTimeout(res,1000)});
+return{ready,get:k=>emb?(k in c?c[k]:null):localStorage.getItem(k),
+set:(k,v)=>{if(emb){c[k]=String(v);window.parent.postMessage({type:"bs-storage-set",key:k,value:String(v)},"*")}else localStorage.setItem(k,v)},
+remove:k=>{if(emb){delete c[k];window.parent.postMessage({type:"bs-storage-remove",key:k},"*")}else localStorage.removeItem(k)}}})();
+
+const ROOM = 'shared-canvas-v1';
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const cursorLayer = document.getElementById('cursorLayer');
+const peerListEl = document.getElementById('peerList');
+
+let selfId = null;
+let selfName = 'me';
+let selfColor = '#ff3b30';
+let peers = {}; // id -> {name,color}
+let cursorEls = {}; // id -> dom el
+
+let strokes = []; // {id, color, size, points:[{x,y}], erase}
+let strokeIndex = {}; // id -> stroke ref
+let drawing = false;
+let currentStrokeId = null;
+let currentColor = document.getElementById('colorPick').value;
+let currentSize = parseInt(document.getElementById('sizeRange').value,10);
+let erasing = false;
+
+function resize(){
+  const dpr = window.devicePixelRatio||1;
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  canvas.style.width = w+'px'; canvas.style.height = h+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  redrawAll();
+}
+window.addEventListener('resize', resize);
+
+function redrawAll(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  for(const s of strokes){
+    drawStroke(s);
+  }
+}
+
+function drawStroke(s){
+  if(s.points.length===0) return;
+  ctx.lineJoin='round';
+  ctx.lineCap='round';
+  ctx.strokeStyle = s.erase ? '#ffffff' : s.color;
+  ctx.lineWidth = s.size;
+  if(s.points.length===1){
+    const p=s.points[0];
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,s.size/2,0,Math.PI*2);
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fill();
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(s.points[0].x, s.points[0].y);
+  for(let i=1;i<s.points.length;i++){
+    ctx.lineTo(s.points[i].x, s.points[i].y);
+  }
+  ctx.stroke();
+}
+
+function drawSegment(s, p0, p1){
+  ctx.lineJoin='round';
+  ctx.lineCap='round';
+  ctx.strokeStyle = s.erase ? '#ffffff' : s.color;
+  ctx.lineWidth = s.size;
+  ctx.beginPath();
+  ctx.moveTo(p0.x,p0.y);
+  ctx.lineTo(p1.x,p1.y);
+  ctx.stroke();
+}
+
+function genId(){
+  return (selfId||'anon')+'-'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
+}
+
+function send(payload){
+  window.parent.postMessage({type:'p2p-send', room:ROOM, payload}, '*');
+}
+
+function saveState(){
+  try{
+    const trimmed = strokes.slice(-400);
+    BS.set('canvas-strokes', JSON.stringify(trimmed));
+  }catch(e){}
+}
+let saveTimer=null;
+function scheduleSave(){
+  if(saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 800);
+}
+
+async function loadState(){
+  await BS.ready;
+  const raw = BS.get('canvas-strokes');
+  if(raw){
+    try{
+      strokes = JSON.parse(raw);
+      strokeIndex = {};
+      for(const s of strokes) strokeIndex[s.id]=s;
+    }catch(e){ strokes=[]; }
+  }
+  redrawAll();
+}
+
+function getPos(e){
+  const rect = canvas.getBoundingClientRect();
+  let clientX, clientY;
+  if(e.touches && e.touches[0]){ clientX=e.touches[0].clientX; clientY=e.touches[0].clientY; }
+  else { clientX=e.clientX; clientY=e.clientY; }
+  return { x: clientX-rect.left, y: clientY-rect.top };
+}
+
+function startDraw(e){
+  e.preventDefault();
+  drawing = true;
+  currentStrokeId = genId();
+  const pos = getPos(e);
+  const s = { id: currentStrokeId, color: currentColor, size: currentSize, erase: erasing, points:[pos] };
+  strokes.push(s);
+  strokeIndex[s.id]=s;
+  drawStroke(s);
+  send({kind:'point', id:s.id, color:s.color, size:s.size, erase:s.erase, x:pos.x, y:pos.y, start:true});
+  sendCursor(pos);
+}
+
+function moveDraw(e){
+  const pos = getPos(e);
+  sendCursor(pos);
+  if(!drawing) return;
+  e.preventDefault();
+  const s = strokeIndex[currentStrokeId];
+  if(!s) return;
+  const prev = s.points[s.points.length-1];
+  s.points.push(pos);
+  drawSegment(s, prev, pos);
+  send({kind:'point', id:s.id, x:pos.x, y:pos.y});
+}
+
+function endDraw(e){
+  if(!drawing) return;
+  drawing = false;
+  send({kind:'end', id:currentStrokeId});
+  currentStrokeId = null;
+  scheduleSave();
+}
+
+canvas.addEventListener('mousedown', startDraw);
+canvas.addEventListener('mousemove', moveDraw);
+window.addEventListener('mouseup', endDraw);
+canvas.addEventListener('touchstart', startDraw, {passive:false});
+canvas.addEventListener('touchmove', moveDraw, {passive:false});
+canvas.addEventListener('touchend', endDraw);
+
+let lastCursorSend = 0;
+function sendCursor(pos){
+  const now = Date.now();
+  if(now - lastCursorSend < 60) return;
+  lastCursorSend = now;
+  send({kind:'cursor', x:pos.x, y:pos.y, color:selfColor, name:selfName});
+}
+
+document.getElementById('colorPick').addEventListener('input', e=>{
+  currentColor = e.target.value;
+  erasing = false;
+  document.getElementById('eraserBtn').classList.remove('active');
+});
+document.getElementById('sizeRange').addEventListener('input', e=>{
+  currentSize = parseInt(e.target.value,10);
+});
+document.getElementById('eraserBtn').addEventListener('click', ()=>{
+  erasing = !erasing;
+  document.getElementById('eraserBtn').classList.toggle('active', erasing);
+});
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  strokes = []; strokeIndex = {};
+  redrawAll();
+  scheduleSave();
+  send({kind:'clear'});
+});
+
+function applyRemote(payload, fromId){
+  if(payload.kind==='point'){
+    let s = strokeIndex[payload.id];
+    if(!s){
+      s = { id: payload.id, color: payload.color||'#000', size: payload.size||4, erase: !!payload.erase, points:[] };
+      strokes.push(s);
+      strokeIndex[s.id] = s;
+    }
+    const pos = {x:payload.x, y:payload.y};
+    const prev = s.points[s.points.length-1];
+    s.points.push(pos);
+    if(prev) drawSegment(s, prev, pos); else drawStroke(s);
+  } else if(payload.kind==='end'){
+    scheduleSave();
+  } else if(payload.kind==='clear'){
+    strokes = []; strokeIndex = {};
+    redrawAll();
+    scheduleSave();
+  } else if(payload.kind==='cursor'){
+    updateCursor(fromId, payload);
+  } else if(payload.kind==='requestSync'){
+    if(payload.to && payload.to!==selfId) return;
+    send({kind:'syncData', to: payload.from, strokes: strokes.slice(-400)});
+  } else if(payload.kind==='syncData'){
+    if(payload.to && payload.to!==selfId) return;
+    if(strokes.length===0 && Array.isArray(payload.strokes) && payload.strokes.length){
+      strokes = payload.strokes;
+      strokeIndex = {};
+      for(const s of strokes) strokeIndex[s.id]=s;
+      redrawAll();
+      scheduleSave();
+    }
+  }
+}
+
+function updateCursor(id, payload){
+  if(id===selfId) return;
+  let el = cursorEls[id];
+  if(!el){
+    el = document.createElement('div');
+    el.style.position='absolute';
+    el.style.width='14px';
+    el.style.height='14px';
+    el.style.borderRadius='50%';
+    el.style.border='2px solid #fff';
+    el.style.transform='translate(-50%,-50%)';
+    el.style.transition='left 0.05s linear, top 0.05s linear';
+    const label = document.createElement('div');
+    label.className='cursorLabel';
+    el.appendChild(label);
+    cursorLayer.appendChild(el);
+    cursorEls[id] = el;
+  }
+  el.style.background = payload.color || '#888';
+  el.style.left = payload.x+'px';
+  el.style.top = payload.y+'px';
+  const label = el.querySelector('.cursorLabel');
+  label.textContent = payload.name || id.slice(0,6);
+  label.style.background = payload.color || '#888';
+  el.style.display='block';
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(()=>{ el.style.display='none'; }, 4000);
+}
+
+function colorFromId(id){
+  let h=0;
+  for(let i=0;i<id.length;i++) h = (h*31 + id.charCodeAt(i))>>>0;
+  const hue = h % 360;
+  return 'hsl('+hue+',70%,55%)';
+}
+
+function renderPeerList(){
+  const ids = Object.keys(peers);
+  if(ids.length===0){ peerListEl.textContent = 'just you'; return; }
+  peerListEl.innerHTML='';
+  const meRow = document.createElement('div');
+  meRow.className='peerRow';
+  meRow.innerHTML = '<span class="dot" style="background:'+selfColor+'"></span><span>'+selfName+' (you)</span>';
+  peerListEl.appendChild(meRow);
+  for(const id of ids){
+    if(id===selfId) continue;
+    const p = peers[id];
+    const row = document.createElement('div');
+    row.className='peerRow';
+    row.innerHTML = '<span class="dot" style="background:'+(p.color||colorFromId(id))+'"></span><span>'+(p.name||id.slice(0,6))+'</span>';
+    peerListEl.appendChild(row);
+  }
+}
+
+window.addEventListener('message', (e)=>{
+  const d = e.data;
+  if(!d || !d.type) return;
+  if(d.type==='p2p-self'){
+    selfId = d.id || d.user && d.user.id || selfId;
+    selfName = (d.name) || (d.user && d.user.name) || ('User-'+(selfId||'?').slice(0,4));
+    selfColor = (d.color) || (d.user && d.user.color) || colorFromId(selfId||'self');
+    document.getElementById('colorPick').value = currentColor;
+    renderPeerList();
+  } else if(d.type==='p2p-users'){
+    const list = d.users || d.peers || [];
+    const newPeers = {};
+    for(const u of list){
+      const id = u.id || u.peerId || u.clientId;
+      if(!id) continue;
+      newPeers[id] = { name: u.name || ('User-'+id.slice(0,4)), color: u.color || colorFromId(id) };
+    }
+    peers = newPeers;
+    renderPeerList();
+    for(const id of Object.keys(cursorEls)){
+      if(!peers[id] && id!==selfId){
+        cursorEls[id].remove();
+        delete cursorEls[id];
+      }
+    }
+  } else if(d.type==='p2p-message'){
+    if(d.room !== ROOM) return;
+    const payload = d.payload || {};
+    const fromId = d.from || d.sender || (payload && payload.from) || null;
+    applyRemote(payload, fromId);
+  }
+});
+
+// join hub
+window.parent.postMessage({type:'p2p-subscribe'}, '*');
+
+async function init(){
+  await loadState();
+  resize();
+  setTimeout(()=>{
+    send({kind:'requestSync', from: selfId, to:null});
+  }, 500);
+}
+init();
+</script>
+</body>
+</html>
