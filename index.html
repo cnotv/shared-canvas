@@ -31,6 +31,8 @@
   #connStatus{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:normal;opacity:1;}
   #connStatus .connDot{width:8px;height:8px;border-radius:50%;background:#e53935;box-shadow:0 0 4px #e53935;transition:background 0.3s,box-shadow 0.3s;}
   #connStatus.online .connDot{background:#4caf50;box-shadow:0 0 4px #4caf50;}
+  #connStatus.connecting .connDot{background:#ffb300;box-shadow:0 0 4px #ffb300;animation:pulse 1s infinite;}
+  @keyframes pulse{0%{opacity:1;}50%{opacity:0.3;}100%{opacity:1;}}
   .peerRow{display:flex;align-items:center;gap:6px;margin:3px 0;}
   .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
   .cursorLabel{
@@ -54,7 +56,7 @@
   <button id="clearBtn">Clear All</button>
   <button id="reloadBtn" title="Re-fetch the latest canvas from peers">⟳ Reload</button>
 </div>
-<div id="peers"><h4>Peers <span id="connStatus"><span class="connDot"></span><span id="connText">Offline</span></span></h4><div id="peerList">connecting...</div></div>
+<div id="peers"><h4>Peers <span id="connStatus"><span class="connDot"></span><span id="connText">Connecting...</span></span></h4><div id="peerList">connecting...</div></div>
 <div id="cursorLayer" style="position:fixed;inset:0;pointer-events:none;z-index:5;"></div>
 <div id="syncToast">Syncing with peers...</div>
 
@@ -77,20 +79,23 @@ const reloadBtn = document.getElementById('reloadBtn');
 const connStatus = document.getElementById('connStatus');
 const connText = document.getElementById('connText');
 
-let isConnected = false;
-function setConnected(state){
-  if(isConnected === state) return;
-  isConnected = state;
-  if(state){
+const embedded = window.parent !== window;
+let connState = 'connecting'; // 'connecting' | 'online' | 'offline'
+function setConnState(state){
+  if(connState === state) return;
+  connState = state;
+  connStatus.classList.remove('online','connecting');
+  if(state==='online'){
     connStatus.classList.add('online');
     connText.textContent = 'Online';
+  } else if(state==='connecting'){
+    connStatus.classList.add('connecting');
+    connText.textContent = 'Connecting...';
   } else {
-    connStatus.classList.remove('online');
     connText.textContent = 'Offline';
   }
 }
-// Start offline until we hear back from the builder shell (parent).
-setConnected(false);
+setConnState(embedded ? 'connecting' : 'offline');
 
 let selfId = null;
 let selfName = 'me';
@@ -165,6 +170,7 @@ function genId(){
 }
 
 function send(payload){
+  if(!embedded) return;
   window.parent.postMessage({type:'p2p-send', room:ROOM, payload}, '*');
 }
 
@@ -292,6 +298,7 @@ function requestReload(){
 reloadBtn.addEventListener('click', requestReload);
 
 function applyRemote(payload, fromId){
+  if(!payload || !payload.kind) return;
   if(payload.kind==='point'){
     let s = strokeIndex[payload.id];
     if(!s){
@@ -335,7 +342,7 @@ function applyRemote(payload, fromId){
 }
 
 function updateCursor(id, payload){
-  if(id===selfId) return;
+  if(!id || id===selfId) return;
   let el = cursorEls[id];
   if(!el){
     el = document.createElement('div');
@@ -365,6 +372,7 @@ function updateCursor(id, payload){
 
 function colorFromId(id){
   let h=0;
+  id = String(id||'anon');
   for(let i=0;i<id.length;i++) h = (h*31 + id.charCodeAt(i))>>>0;
   const hue = h % 360;
   return 'hsl('+hue+',70%,55%)';
@@ -372,40 +380,59 @@ function colorFromId(id){
 
 function renderPeerList(){
   const ids = Object.keys(peers);
+  if(ids.length===0 && !embedded){ peerListEl.textContent = 'standalone (no hub)'; return; }
   if(ids.length===0){ peerListEl.textContent = 'just you'; return; }
   peerListEl.innerHTML='';
   const meRow = document.createElement('div');
   meRow.className='peerRow';
-  meRow.innerHTML = '<span class="dot" style="background:'+selfColor+'"></span><span>'+selfName+' (you)</span>';
+  meRow.innerHTML = '<span class="dot" style="background:'+selfColor+'"></span><span>'+(selfName||'me')+' (you)</span>';
   peerListEl.appendChild(meRow);
   for(const id of ids){
     if(id===selfId) continue;
     const p = peers[id];
     const row = document.createElement('div');
     row.className='peerRow';
-    row.innerHTML = '<span class="dot" style="background:'+(p.color||colorFromId(id))+'"></span><span>'+(p.name||id.slice(0,6))+'</span>';
+    row.innerHTML = '<span class="dot" style="background:'+(p.color||colorFromId(id))+'"></span><span>'+(p.name||String(id).slice(0,6))+'</span>';
     peerListEl.appendChild(row);
   }
+}
+
+function normalizePeerList(d){
+  // Try to find the peer list under a variety of possible keys/shapes.
+  let list = d.users || d.peers || d.list || d.clients || [];
+  if(list && !Array.isArray(list) && typeof list === 'object'){
+    // maybe it's a map of id -> info
+    list = Object.keys(list).map(k=>{
+      const v = list[k];
+      if(v && typeof v === 'object') return Object.assign({id:k}, v);
+      return {id:k, name:v};
+    });
+  }
+  if(!Array.isArray(list)) list = [];
+  return list;
 }
 
 window.addEventListener('message', (e)=>{
   const d = e.data;
   if(!d || !d.type) return;
   if(d.type==='p2p-self'){
-    setConnected(true);
-    selfId = d.id || d.user && d.user.id || selfId;
-    selfName = (d.name) || (d.user && d.user.name) || ('User-'+(selfId||'?').slice(0,4));
-    selfColor = (d.color) || (d.user && d.user.color) || colorFromId(selfId||'self');
-    document.getElementById('colorPick').value = currentColor;
+    setConnState('online');
+    const idCandidate = d.id || (d.user && d.user.id) || (d.self && d.self.id);
+    if(idCandidate) selfId = idCandidate;
+    selfName = d.name || (d.user && d.user.name) || (d.self && d.self.name) || selfName || ('User-'+(selfId||'anon').slice(0,4));
+    selfColor = d.color || (d.user && d.user.color) || (d.self && d.self.color) || colorFromId(selfId||'self');
     renderPeerList();
   } else if(d.type==='p2p-users'){
-    setConnected(true);
-    const list = d.users || d.peers || [];
+    setConnState('online');
+    const list = normalizePeerList(d);
     const newPeers = {};
     for(const u of list){
-      const id = u.id || u.peerId || u.clientId;
+      if(u==null) continue;
+      const id = (typeof u === 'string') ? u : (u.id || u.peerId || u.clientId);
       if(!id) continue;
-      newPeers[id] = { name: u.name || ('User-'+id.slice(0,4)), color: u.color || colorFromId(id) };
+      const name = (typeof u === 'object' && u.name) ? u.name : ('User-'+String(id).slice(0,4));
+      const color = (typeof u === 'object' && u.color) ? u.color : colorFromId(id);
+      newPeers[id] = { name, color };
     }
     peers = newPeers;
     renderPeerList();
@@ -416,20 +443,34 @@ window.addEventListener('message', (e)=>{
       }
     }
   } else if(d.type==='p2p-message'){
-    setConnected(true);
-    if(d.room !== ROOM) return;
-    const payload = d.payload || {};
-    const fromId = d.from || d.sender || (payload && payload.from) || null;
+    setConnState('online');
+    if(d.room && d.room !== ROOM) return;
+    const payload = d.payload || d.data || d.message || {};
+    const fromId = d.from || d.sender || d.senderId || d.id || (payload && payload.from) || null;
     applyRemote(payload, fromId);
   }
 });
 
-// join hub
-if(window.parent !== window){
+// join hub, with retry in case the hub attaches its listener slightly after us
+// or our first message is sent before the parent is ready to receive it.
+function subscribe(){
+  if(!embedded) return;
   window.parent.postMessage({type:'p2p-subscribe'}, '*');
+}
+if(embedded){
+  subscribe();
+  let attempts = 0;
+  const resubTimer = setInterval(()=>{
+    attempts++;
+    if(connState === 'online' || attempts > 20){
+      clearInterval(resubTimer);
+      return;
+    }
+    subscribe();
+  }, 1000);
+  window.addEventListener('load', subscribe);
 } else {
-  // Running standalone (not embedded in a shell) - no hub to connect to.
-  setConnected(false);
+  setConnState('offline');
   peerListEl.textContent = 'standalone (no hub)';
 }
 
@@ -438,7 +479,7 @@ async function init(){
   resize();
   setTimeout(()=>{
     send({kind:'requestSync', from: selfId, to:null});
-  }, 200);
+  }, 400);
 }
 init();
 </script>
