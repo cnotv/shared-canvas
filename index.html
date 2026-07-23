@@ -27,7 +27,10 @@
     padding:6px 10px;border-radius:10px;color:#eee;font-size:12px;z-index:10;
     max-width:220px;max-height:60vh;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,0.4);
   }
-  #peers h4{margin:2px 0 6px 0;font-size:12px;opacity:0.8;}
+  #peers h4{margin:2px 0 6px 0;font-size:12px;opacity:0.8;display:flex;align-items:center;gap:6px;}
+  #connStatus{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:normal;opacity:1;}
+  #connStatus .connDot{width:8px;height:8px;border-radius:50%;background:#e53935;box-shadow:0 0 4px #e53935;transition:background 0.3s,box-shadow 0.3s;}
+  #connStatus.online .connDot{background:#4caf50;box-shadow:0 0 4px #4caf50;}
   .peerRow{display:flex;align-items:center;gap:6px;margin:3px 0;}
   .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
   .cursorLabel{
@@ -51,7 +54,7 @@
   <button id="clearBtn">Clear All</button>
   <button id="reloadBtn" title="Re-fetch the latest canvas from peers">⟳ Reload</button>
 </div>
-<div id="peers"><h4>Peers</h4><div id="peerList">connecting...</div></div>
+<div id="peers"><h4>Peers <span id="connStatus"><span class="connDot"></span><span id="connText">Offline</span></span></h4><div id="peerList">connecting...</div></div>
 <div id="cursorLayer" style="position:fixed;inset:0;pointer-events:none;z-index:5;"></div>
 <div id="syncToast">Syncing with peers...</div>
 
@@ -71,6 +74,23 @@ const cursorLayer = document.getElementById('cursorLayer');
 const peerListEl = document.getElementById('peerList');
 const syncToast = document.getElementById('syncToast');
 const reloadBtn = document.getElementById('reloadBtn');
+const connStatus = document.getElementById('connStatus');
+const connText = document.getElementById('connText');
+
+let isConnected = false;
+function setConnected(state){
+  if(isConnected === state) return;
+  isConnected = state;
+  if(state){
+    connStatus.classList.add('online');
+    connText.textContent = 'Online';
+  } else {
+    connStatus.classList.remove('online');
+    connText.textContent = 'Offline';
+  }
+}
+// Start offline until we hear back from the builder shell (parent).
+setConnected(false);
 
 let selfId = null;
 let selfName = 'me';
@@ -372,12 +392,14 @@ window.addEventListener('message', (e)=>{
   const d = e.data;
   if(!d || !d.type) return;
   if(d.type==='p2p-self'){
+    setConnected(true);
     selfId = d.id || d.user && d.user.id || selfId;
     selfName = (d.name) || (d.user && d.user.name) || ('User-'+(selfId||'?').slice(0,4));
     selfColor = (d.color) || (d.user && d.user.color) || colorFromId(selfId||'self');
     document.getElementById('colorPick').value = currentColor;
     renderPeerList();
   } else if(d.type==='p2p-users'){
+    setConnected(true);
     const list = d.users || d.peers || [];
     const newPeers = {};
     for(const u of list){
@@ -394,6 +416,7 @@ window.addEventListener('message', (e)=>{
       }
     }
   } else if(d.type==='p2p-message'){
+    setConnected(true);
     if(d.room !== ROOM) return;
     const payload = d.payload || {};
     const fromId = d.from || d.sender || (payload && payload.from) || null;
@@ -402,7 +425,13 @@ window.addEventListener('message', (e)=>{
 });
 
 // join hub
-window.parent.postMessage({type:'p2p-subscribe'}, '*');
+if(window.parent !== window){
+  window.parent.postMessage({type:'p2p-subscribe'}, '*');
+} else {
+  // Running standalone (not embedded in a shell) - no hub to connect to.
+  setConnected(false);
+  peerListEl.textContent = 'standalone (no hub)';
+}
 
 async function init(){
   await loadState();
