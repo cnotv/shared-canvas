@@ -21,6 +21,7 @@
   }
   #toolbar button.active{background:#4caf50;border-color:#4caf50;}
   #toolbar button:hover{background:#444;}
+  #toolbar button#reloadBtn.syncing{background:#2196f3;border-color:#2196f3;}
   #peers{
     position:fixed;top:8px;right:8px;background:rgba(30,30,30,0.85);
     padding:6px 10px;border-radius:10px;color:#eee;font-size:12px;z-index:10;
@@ -33,6 +34,12 @@
     position:absolute;font-size:10px;color:#fff;padding:1px 5px;border-radius:4px;
     pointer-events:none;transform:translate(-50%,-140%);white-space:nowrap;
   }
+  #syncToast{
+    position:fixed;bottom:12px;left:50%;transform:translateX(-50%);
+    background:rgba(30,30,30,0.9);color:#eee;padding:6px 14px;border-radius:8px;
+    font-size:12px;z-index:20;opacity:0;pointer-events:none;transition:opacity 0.3s;
+  }
+  #syncToast.show{opacity:1;}
 </style>
 </head>
 <body>
@@ -42,9 +49,11 @@
   <label>Size <input type="range" id="sizeRange" min="1" max="40" value="4"></label>
   <button id="eraserBtn">Eraser</button>
   <button id="clearBtn">Clear All</button>
+  <button id="reloadBtn" title="Re-fetch the latest canvas from peers">⟳ Reload</button>
 </div>
 <div id="peers"><h4>Peers</h4><div id="peerList">connecting...</div></div>
 <div id="cursorLayer" style="position:fixed;inset:0;pointer-events:none;z-index:5;"></div>
+<div id="syncToast">Syncing with peers...</div>
 
 <script>
 const BS=(()=>{const emb=window.parent!==window;let c={};const ready=new Promise(res=>{
@@ -60,6 +69,8 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const cursorLayer = document.getElementById('cursorLayer');
 const peerListEl = document.getElementById('peerList');
+const syncToast = document.getElementById('syncToast');
+const reloadBtn = document.getElementById('reloadBtn');
 
 let selfId = null;
 let selfName = 'me';
@@ -74,6 +85,8 @@ let currentStrokeId = null;
 let currentColor = document.getElementById('colorPick').value;
 let currentSize = parseInt(document.getElementById('sizeRange').value,10);
 let erasing = false;
+let forceSyncPending = false;
+let syncTimeout = null;
 
 function resize(){
   const dpr = window.devicePixelRatio||1;
@@ -236,6 +249,28 @@ document.getElementById('clearBtn').addEventListener('click', ()=>{
   send({kind:'clear'});
 });
 
+function showToast(msg){
+  syncToast.textContent = msg;
+  syncToast.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(()=>{ syncToast.classList.remove('show'); }, 2000);
+}
+
+function requestReload(){
+  forceSyncPending = true;
+  reloadBtn.classList.add('syncing');
+  reloadBtn.disabled = true;
+  showToast('Syncing with peers...');
+  send({kind:'requestSync', from: selfId, to:null});
+  clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(()=>{
+    forceSyncPending = false;
+    reloadBtn.classList.remove('syncing');
+    reloadBtn.disabled = false;
+  }, 3000);
+}
+reloadBtn.addEventListener('click', requestReload);
+
 function applyRemote(payload, fromId){
   if(payload.kind==='point'){
     let s = strokeIndex[payload.id];
@@ -261,12 +296,20 @@ function applyRemote(payload, fromId){
     send({kind:'syncData', to: payload.from, strokes: strokes.slice(-400)});
   } else if(payload.kind==='syncData'){
     if(payload.to && payload.to!==selfId) return;
-    if(strokes.length===0 && Array.isArray(payload.strokes) && payload.strokes.length){
+    const shouldApply = forceSyncPending || (strokes.length===0 && Array.isArray(payload.strokes) && payload.strokes.length);
+    if(shouldApply && Array.isArray(payload.strokes)){
       strokes = payload.strokes;
       strokeIndex = {};
       for(const s of strokes) strokeIndex[s.id]=s;
       redrawAll();
       scheduleSave();
+      if(forceSyncPending){
+        forceSyncPending = false;
+        clearTimeout(syncTimeout);
+        reloadBtn.classList.remove('syncing');
+        reloadBtn.disabled = false;
+        showToast('Canvas updated!');
+      }
     }
   }
 }
