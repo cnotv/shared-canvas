@@ -157,7 +157,7 @@ function saveState(){
 let saveTimer=null;
 function scheduleSave(){
   if(saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveState, 800);
+  saveTimer = setTimeout(saveState, 300);
 }
 
 async function loadState(){
@@ -191,7 +191,7 @@ function startDraw(e){
   strokeIndex[s.id]=s;
   drawStroke(s);
   send({kind:'point', id:s.id, color:s.color, size:s.size, erase:s.erase, x:pos.x, y:pos.y, start:true});
-  sendCursor(pos);
+  sendCursor(pos, true);
 }
 
 function moveDraw(e){
@@ -223,9 +223,9 @@ canvas.addEventListener('touchmove', moveDraw, {passive:false});
 canvas.addEventListener('touchend', endDraw);
 
 let lastCursorSend = 0;
-function sendCursor(pos){
+function sendCursor(pos, force){
   const now = Date.now();
-  if(now - lastCursorSend < 60) return;
+  if(!force && now - lastCursorSend < 25) return;
   lastCursorSend = now;
   send({kind:'cursor', x:pos.x, y:pos.y, color:selfColor, name:selfName});
 }
@@ -267,7 +267,7 @@ function requestReload(){
     forceSyncPending = false;
     reloadBtn.classList.remove('syncing');
     reloadBtn.disabled = false;
-  }, 3000);
+  }, 1500);
 }
 reloadBtn.addEventListener('click', requestReload);
 
@@ -325,7 +325,7 @@ function updateCursor(id, payload){
     el.style.borderRadius='50%';
     el.style.border='2px solid #fff';
     el.style.transform='translate(-50%,-50%)';
-    el.style.transition='left 0.05s linear, top 0.05s linear';
+    el.style.transition='left 0.02s linear, top 0.02s linear';
     const label = document.createElement('div');
     label.className='cursorLabel';
     el.appendChild(label);
@@ -409,7 +409,7 @@ async function init(){
   resize();
   setTimeout(()=>{
     send({kind:'requestSync', from: selfId, to:null});
-  }, 500);
+  }, 200);
 }
 init();
 </script>
